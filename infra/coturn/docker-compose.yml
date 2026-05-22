@@ -1,0 +1,31 @@
+# Jump Desktop Clone — Coturn TURN Server (Docker Compose)
+#
+# 배포 위치: 홍콩 리전 클라우드 (AWS AP-East-1, Alibaba HK, Tencent HK)
+# 프로토콜: TURNS (TURN over TLS) on TCP 443
+#
+# 사전 준비:
+# 1. TLS 인증서 준비 (Let's Encrypt 또는 클라우드 인증서)
+#    - cert.pem → ./certs/cert.pem
+#    - privkey.pem → ./certs/privkey.pem
+# 2. 환경 변수 설정:
+#    - TURN_USER: TURN 사용자 이름
+#    - TURN_PASSWORD: TURN 비밀번호
+#    - TURN_REALM: 서버 도메인 (예: turn.yourdomain.hk)
+#    - EXTERNAL_IP: 서버의 공인 IP 주소
+
+services:
+  coturn:
+    image: coturn/coturn:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./certs:/etc/coturn/certs:ro
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+    environment:
+      - TURN_USER=${TURN_USER:-jumpdesktop}
+      - TURN_PASSWORD=${TURN_PASSWORD:-changeme}
+    # TCP 443 for TURNS (TLS) — 필수: GFW DPI 우회
+    # UDP 443 for DTLS
+    ports:
+      - "443:443/tcp"
+      - "443:443/udp"
