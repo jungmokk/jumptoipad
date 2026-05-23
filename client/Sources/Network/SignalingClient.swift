@@ -40,7 +40,11 @@ class SignalingClient: NSObject {
     func connect() {
         workQueue.async { [weak self] in
             guard let self = self else { return }
-            self.disconnect()
+            // Perform synchronous cleanup instead of calling async disconnect()
+            self.stopPingTimer()
+            self.webSocketTask?.cancel(with: .normalClosure, reason: nil)
+            self.webSocketTask = nil
+            self.isConnected = false
             
             // Build authenticated WSS request with token query parameter
             var components = URLComponents(url: self.serverURL, resolvingAgainstBaseURL: false)
@@ -76,8 +80,8 @@ class SignalingClient: NSObject {
     }
     
     /// Join an existing room on the signaling server using roomId
-    func joinRoom(roomId: String) {
-        sendMessage(type: "join_room", roomId: roomId)
+    func joinRoom(roomId: String, settings: [String: Any]? = nil) {
+        sendMessage(type: "join_room", roomId: roomId, payload: settings)
     }
     
     /// Send SDP Answer to the remote host

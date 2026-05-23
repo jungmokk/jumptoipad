@@ -7,14 +7,21 @@ import WebRTC
 struct DashboardView: View {
     
     @StateObject private var coordinator: ClientConnectionCoordinator
-    @State private var inputRoomId = ""
+    @State private var inputRoomId = "JUMPTOIPAD"
     @State private var isGlowAnimating = false
+    // IMPORTANT: @State으로 저장하여 SwiftUI 리렌더 시마다 새 인스턴스가 생성되는 치명적 버그 방지
+    @State private var inputCollector: InputCollector? = nil
     
-    private var inputCollector: InputCollector {
-        InputCollector { data in
-            coordinator.sendInputEvent(data)
-        }
-    }
+    @State private var isHudVisible = false
+    
+    // Add Bitrate State
+    @State private var selectedBitrateKbps: Int = 8000
+    private let bitrateOptions: [(name: String, value: Int)] = [
+        ("2Mbps", 2000),
+        ("4Mbps", 4000),
+        ("8Mbps", 8000),
+        ("12Mbps", 12000)
+    ]
     
     private var rttColor: Color {
         if coordinator.rttMs < 50.0 {
@@ -28,9 +35,12 @@ struct DashboardView: View {
     
     /// Pre-configured local parameters (can be configured via settings menu in the future)
     init() {
-        let serverURL = URL(string: "wss://127.0.0.1:8443")! // Defaults to localhost for development
+        let serverURL = URL(string: "ws://100.119.136.35:8443")! // Connected over Tailscale VPN
         let mockToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJpUGFkQ2xpZW50Iiwicm9sZSI6ImNsaWVudCIsImlhdCI6MTcyMjIzODQ4MCwiZXhwIjoxODIyMjM4NDgwfQ.mockToken" // Mock test token
-        let iceServers = ["turns:turn.yourdomain.hk:443?transport=tcp"]
+        let iceServers = [
+            "stun:stun.l.google.com:19302",
+            "turns:turn.yourdomain.hk:443?transport=tcp"
+        ]
         
         _coordinator = StateObject(wrappedValue: ClientConnectionCoordinator(
             serverURL: serverURL,
@@ -62,70 +72,59 @@ struct DashboardView: View {
                 .opacity(0.12)
                 .offset(x: 200, y: 250)
             
-            VStack(spacing: 30) {
-                if coordinator.connectionState == .connected, let videoTrack = coordinator.activeVideoTrack {
-                    // ─── Active Fullscreen Streaming State ───
-                    ZStack {
-                        VideoRendererView(videoTrack: videoTrack, inputCollector: inputCollector)
-                            .cornerRadius(16)
-                            .shadow(color: .purple.opacity(0.4), radius: 24, x: 0, y: 8)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 16)
-                                    .stroke(LinearGradient(colors: [.purple.opacity(0.5), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
-                            )
-                        
-                        // Overlay HUD Dashboard bar
-                        VStack {
-                            HStack(spacing: 12) {
-                                HStack(spacing: 8) {
+            if coordinator.connectionState == .connected, let videoTrack = coordinator.activeVideoTrack {
+                // ─── Active Fullscreen Streaming State ───
+                ZStack {
+                    VideoRendererView(videoTrack: videoTrack, inputCollector: inputCollector ?? InputCollector { _, _ in })
+                        .ignoresSafeArea()
+                    
+                    // ─── Top Auto-Hiding HUD ───
+                    VStack {
+                        VStack(spacing: 0) {
+                            // Actual HUD Box
+                            HStack {
+                                // Connection Status
+                                HStack(spacing: 6) {
                                     Circle()
-                                        .fill(Color.green)
+                                        .fill(coordinator.connectionState == .connected ? Color.green : Color.red)
                                         .frame(width: 8, height: 8)
-                                        .scaleEffect(isGlowAnimating ? 1.2 : 0.8)
-                                        .animation(Animation.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: isGlowAnimating)
-                                    
-                                    Text("원격 연결 중 (Live)")
+                                    Text(coordinator.connectionState.rawValue)
                                         .font(.system(.subheadline, design: .rounded))
                                         .bold()
-                                        .foregroundColor(.white)
+                                        .foregroundColor(coordinator.connectionState == .connected ? Color.green : Color.red)
                                 }
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
                                 .background(.ultraThinMaterial)
                                 .cornerRadius(30)
                                 
-                                // Real-time Latency HUD Overlay
+                                // RTT Status
                                 HStack(spacing: 6) {
-                                    Image(systemName: "gauge.medium")
-                                        .font(.system(size: 12))
-                                        .foregroundColor(rttColor)
-                                    
-                                    Text(String(format: "RTT: %.1fms", coordinator.rttMs))
+                                    Image(systemName: "wifi")
+                                        .font(.system(size: 12, weight: .bold))
+                                    Text(String(format: "%.1f ms", coordinator.rttMs))
                                         .font(.system(.subheadline, design: .monospaced))
                                         .bold()
-                                        .foregroundColor(rttColor)
-                                        .shadow(color: rttColor.opacity(0.4), radius: 4)
                                 }
+                                .foregroundColor(rttColor)
+                                .shadow(color: rttColor.opacity(0.4), radius: 4)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
                                 .background(.ultraThinMaterial)
                                 .cornerRadius(30)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 30)
-                                        .stroke(rttColor.opacity(0.3), lineWidth: 1)
-                                )
+                                .overlay(RoundedRectangle(cornerRadius: 30).stroke(rttColor.opacity(0.3), lineWidth: 1))
                                 
                                 Spacer()
                                 
+                                // Disconnect Button
                                 Button(action: {
                                     coordinator.disconnect()
                                 }) {
                                     HStack(spacing: 6) {
                                         Image(systemName: "power")
-                                        Text("연결 종료")
+                                        Text("연결 종료").bold()
                                     }
                                     .font(.system(.subheadline, design: .rounded))
-                                    .bold()
                                     .foregroundColor(.white)
                                     .padding(.horizontal, 14)
                                     .padding(.vertical, 8)
@@ -133,18 +132,58 @@ struct DashboardView: View {
                                     .cornerRadius(30)
                                 }
                             }
-                            .padding()
+                            .padding(.horizontal, 20)
+                            .padding(.top, 10)
+                            .padding(.bottom, 10)
+                            .opacity(isHudVisible ? 1 : 0)
+                            .frame(height: isHudVisible ? nil : 0)
+                            .clipped()
                             
-                            Spacer()
+                            // Pull-Tab Hint
+                            Capsule()
+                                .fill(Color.white.opacity(isHudVisible ? 0.0 : 0.3))
+                                .frame(width: 40, height: 4)
+                                .padding(.top, isHudVisible ? 0 : 8)
                         }
+                        .background(
+                            Rectangle()
+                                .fill(Color.black.opacity(0.001)) // Invisible hit target
+                        )
+                        .offset(y: isHudVisible ? 0 : -10)
+                        .onHover { isHovering in
+                            withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                                isHudVisible = isHovering
+                            }
+                        }
+                        .onTapGesture {
+                            withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                                isHudVisible.toggle()
+                            }
+                            if isHudVisible {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                                    if !isHudVisible { return } // Might have been hovered
+                                    withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                                        isHudVisible = false
+                                    }
+                                }
+                            }
+                        }
+                        
+                        Spacer()
                     }
-                    .padding()
                     .transition(.asymmetric(insertion: .scale.combined(with: .opacity), removal: .opacity))
                     .onAppear {
                         isGlowAnimating = true
+                        // inputCollector가 아직 없으면 coordinator와 연결된 인스턴스를 생성
+                        if inputCollector == nil {
+                            inputCollector = InputCollector { [weak coordinator] data, reliable in
+                                coordinator?.sendInputEvent(data, reliable: reliable)
+                            }
+                        }
                     }
-                    
-                } else {
+                } // End ZStack for streaming state
+            } else {
+                VStack(spacing: 30) {
                     // ─── Connection Panel & Setup View ───
                     Spacer()
                     
@@ -169,9 +208,9 @@ struct DashboardView: View {
                     // Glassmorphic setup card
                     VStack(spacing: 24) {
                         Text("호스트 서버 연결")
+                            .bold()
                             .font(.system(.headline, design: .rounded))
                             .foregroundColor(.white)
-                            .bold()
                         
                         // Room ID Input Box
                         HStack {
@@ -194,6 +233,23 @@ struct DashboardView: View {
                                 .stroke(Color.white.opacity(0.12), lineWidth: 1)
                         )
                         
+                        // Streaming Quality Picker
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("스트리밍 품질")
+                                .font(.system(.caption, design: .rounded))
+                                .foregroundColor(.gray)
+                                .padding(.leading, 4)
+                            
+                            Picker("Bitrate", selection: $selectedBitrateKbps) {
+                                ForEach(bitrateOptions, id: \.value) { option in
+                                    Text(option.name).tag(option.value)
+                                }
+                            }
+                            .pickerStyle(SegmentedPickerStyle())
+                            .background(Color.white.opacity(0.1))
+                            .cornerRadius(8)
+                        }
+                        
                         // Connect Button
                         if coordinator.connectionState == .connectingSignaling || 
                             coordinator.connectionState == .joiningRoom || 
@@ -206,31 +262,52 @@ struct DashboardView: View {
                                     .scaleEffect(1.2)
                                 
                                 Text(coordinator.connectionState.rawValue)
+                                    .bold()
                                     .font(.system(.caption, design: .rounded))
                                     .foregroundColor(.purple)
-                                    .bold()
                                     .multilineTextAlignment(.center)
                                 
                                 Button(action: {
                                     coordinator.disconnect()
                                 }) {
                                     Text("취소")
+                                        .bold()
                                         .font(.system(.footnote, design: .rounded))
                                         .foregroundColor(.red)
-                                        .bold()
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 8)
+                                        .contentShape(Rectangle())
                                 }
+                                .disabled(coordinator.connectionState == .connectingSignaling)
+                                .opacity(coordinator.connectionState == .connectingSignaling ? 0.5 : 1.0)
                             }
                             .padding(.top, 10)
                             
                         } else {
                             Button(action: {
                                 guard inputRoomId.count >= 4 else { return }
-                                coordinator.connect(roomId: inputRoomId.trimmingCharacters(in: .whitespacesAndNewlines).uppercased())
+                                
+                                #if os(iOS)
+                                let screenBounds = UIScreen.main.bounds
+                                let screenScale = UIScreen.main.scale
+                                let targetWidth = Int(screenBounds.width * screenScale)
+                                let targetHeight = Int(screenBounds.height * screenScale)
+                                #else
+                                let targetWidth = 1920
+                                let targetHeight = 1080
+                                #endif
+                                
+                                coordinator.connect(
+                                    roomId: inputRoomId.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
+                                    bitrateKbps: selectedBitrateKbps,
+                                    width: targetWidth,
+                                    height: targetHeight
+                                )
                             }) {
                                 Text("연결 시작")
+                                    .bold()
                                     .font(.system(.headline, design: .rounded))
                                     .foregroundColor(.white)
-                                    .bold()
                                     .frame(maxWidth: .infinity)
                                     .padding()
                                     .background(
@@ -250,9 +327,9 @@ struct DashboardView: View {
                                     .foregroundColor(.red)
                                 
                                 Text("오류: \(coordinator.connectionState.rawValue)")
+                                    .bold()
                                     .font(.system(.caption, design: .rounded))
                                     .foregroundColor(.red)
-                                    .bold()
                             }
                             .padding(.top, 4)
                         }

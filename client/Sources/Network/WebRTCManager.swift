@@ -17,9 +17,10 @@ class WebRTCManager: NSObject {
     
     weak var delegate: WebRTCManagerDelegate?
     
-    private var peerConnectionFactory: RTCPeerConnectionFactory
+    let peerConnectionFactory: RTCPeerConnectionFactory
     private var peerConnection: RTCPeerConnection?
     private var dataChannel: RTCDataChannel?
+    private var unreliableDataChannel: RTCDataChannel?
     
     private let iceServers: [String]
     private let turnUsername: String
@@ -153,14 +154,21 @@ class WebRTCManager: NSObject {
     }
     
     /// Send remote control input data via the "input_control" DataChannel
-    func sendInputData(_ data: Data) {
-        guard let channel = dataChannel, channel.readyState == .open else {
-            print("[WebRTC] Error: Input control data channel is not open.")
-            return
-        }
-        
+    func sendInputData(_ data: Data, reliable: Bool = true) {
         let buffer = RTCDataBuffer(data: data, isBinary: true)
-        channel.sendData(buffer)
+        if reliable {
+            if let channel = dataChannel, channel.readyState == .open {
+                channel.sendData(buffer)
+            } else {
+                print("[WebRTC] Error: Reliable input control data channel is not open.")
+            }
+        } else {
+            if let channel = unreliableDataChannel, channel.readyState == .open {
+                channel.sendData(buffer)
+            } else {
+                print("[WebRTC] Error: Unreliable input control data channel is not open.")
+            }
+        }
     }
     
     /// Close the WebRTC peer connection
@@ -196,6 +204,10 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
         print("[WebRTC] Stream removed.")
     }
     
+    func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {
+        print("[WebRTC] Peer connection should negotiate.")
+    }
+    
     func peerConnectionShouldTriggerIceRestart(_ peerConnection: RTCPeerConnection) {
         print("[WebRTC] ICE restart triggered.")
     }
@@ -223,10 +235,13 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
             self.dataChannel = channel
             channel.delegate = self
             delegate?.webRTCManager(self, didOpenDataChannel: channel)
+        } else if channel.label == "input_control_unreliable" {
+            self.unreliableDataChannel = channel
+            channel.delegate = self
         }
     }
     
-    func peerConnection(_ peerConnection: RTCPeerConnection, didChangeState newState: RTCPeerConnectionState) {
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCPeerConnectionState) {
         print("[WebRTC] Peer Connection State changed: \(newState.rawValue)")
         delegate?.webRTCManager(self, didChangeConnectionState: newState)
     }

@@ -11,19 +11,22 @@ enum RemoteInputEventType: String, Codable {
     case clipboard = "clipboard"
     case ping = "ping"
     case pong = "pong"
+    case scroll = "scroll"
 }
 
 struct RemoteInputEvent: Codable {
     let type: RemoteInputEventType
-    let x: Double?
-    let y: Double?
-    let button: String? // "left", "right"
-    let state: String?  // "down", "up"
-    let keyCode: UInt16?
-    let pressure: Float?
-    let tilt: Float?
-    let clipboardText: String?
-    let timestamp: Double?
+    var x: Double? = nil
+    var y: Double? = nil
+    var button: String? = nil // "left", "right"
+    var state: String? = nil  // "down", "up"
+    var keyCode: UInt16? = nil
+    var pressure: Float? = nil
+    var tilt: Float? = nil
+    var clipboardText: String? = nil
+    var timestamp: Double? = nil
+    var deltaX: Double? = nil
+    var deltaY: Double? = nil
 }
 
 /// InputInjector decodes the JSON packet received from the DataChannel,
@@ -38,33 +41,39 @@ class InputInjector {
     
     /// Parse and inject remote event package
     func injectEvent(data: Data) {
-        do {
-            let decoder = JSONDecoder()
-            let event = try decoder.decode(RemoteInputEvent.self, from: data)
-            
-            switch event.type {
-            case .mouseMove:
-                // Preflight accessibility credentials for physical actions
-                guard AccessibilityHelper.isAccessibilityTrusted() else { return }
-                handleMouseMove(event)
-            case .mouseClick:
-                guard AccessibilityHelper.isAccessibilityTrusted() else { return }
-                handleMouseClick(event)
-            case .keyboard:
-                guard AccessibilityHelper.isAccessibilityTrusted() else { return }
-                handleKeyboard(event)
-            case .pencil:
-                guard AccessibilityHelper.isAccessibilityTrusted() else { return }
-                handlePencil(event)
-            case .clipboard:
-                handleClipboard(event)
-            case .ping:
-                handlePing(event)
-            case .pong:
-                break // Handled on Client side only
+        // Offload JSON decoding from the WebRTC DataChannel thread to prevent blocking network receives
+        DispatchQueue.global(qos: .userInteractive).async {
+            do {
+                let decoder = JSONDecoder()
+                let event = try decoder.decode(RemoteInputEvent.self, from: data)
+                
+                switch event.type {
+                case .mouseMove:
+                    // Preflight accessibility credentials for physical actions
+                    guard AccessibilityHelper.isAccessibilityTrusted() else { return }
+                    self.handleMouseMove(event)
+                case .mouseClick:
+                    guard AccessibilityHelper.isAccessibilityTrusted() else { return }
+                    self.handleMouseClick(event)
+                case .keyboard:
+                    guard AccessibilityHelper.isAccessibilityTrusted() else { return }
+                    self.handleKeyboard(event)
+                case .pencil:
+                    guard AccessibilityHelper.isAccessibilityTrusted() else { return }
+                    self.handlePencil(event)
+                case .clipboard:
+                    self.handleClipboard(event)
+                case .ping:
+                    self.handlePing(event)
+                case .pong:
+                    break // Handled on Client side only
+                case .scroll:
+                    guard AccessibilityHelper.isAccessibilityTrusted() else { return }
+                    self.handleScroll(event)
+                }
+            } catch {
+                print("[Injector] Error decoding input payload: \(error.localizedDescription)")
             }
-        } catch {
-            print("[Injector] Error decoding input payload: \(error.localizedDescription)")
         }
     }
     
@@ -81,7 +90,7 @@ class InputInjector {
             mouseCursorPosition: point,
             mouseButton: .left
         )
-        cgEvent?.post(tap: .cghidEventTap)
+        cgEvent?.post(tap: CGEventTapLocation.cghidEventTap)
     }
     
     private func handleMouseClick(_ event: RemoteInputEvent) {
@@ -110,7 +119,7 @@ class InputInjector {
             mouseButton: button
         )
         
-        cgEvent?.post(tap: .cghidEventTap)
+        cgEvent?.post(tap: CGEventTapLocation.cghidEventTap)
     }
     
     private func handleKeyboard(_ event: RemoteInputEvent) {
@@ -123,7 +132,7 @@ class InputInjector {
             keyDown: isDown
         )
         
-        cgEvent?.post(tap: .cghidEventTap)
+        cgEvent?.post(tap: CGEventTapLocation.cghidEventTap)
     }
     
     private func handlePencil(_ event: RemoteInputEvent) {
@@ -143,7 +152,7 @@ class InputInjector {
             cgEvent?.setIntegerValueField(.tabletEventPointPressure, value: Int64(pressure * 1000))
         }
         
-        cgEvent?.post(tap: .cghidEventTap)
+        cgEvent?.post(tap: CGEventTapLocation.cghidEventTap)
     }
     
     private func handleClipboard(_ event: RemoteInputEvent) {
@@ -166,7 +175,9 @@ class InputInjector {
             type: .pong,
             x: nil, y: nil, button: nil, state: nil, keyCode: nil, pressure: nil, tilt: nil,
             clipboardText: nil,
-            timestamp: timestamp
+            timestamp: timestamp,
+            deltaX: nil,
+            deltaY: nil
         )
         
         do {
@@ -178,15 +189,35 @@ class InputInjector {
         }
     }
     
+    private func handleScroll(_ event: RemoteInputEvent) {
+        guard let deltaX = event.deltaX, let deltaY = event.deltaY else { return }
+        
+        // Multiplier to match trackpad natural scroll sensitivity
+        let multiplier: Int32 = 5 
+        let wheel1 = Int32(deltaY) * multiplier
+        let wheel2 = Int32(deltaX) * multiplier
+        
+        let cgEvent = CGEvent(
+            scrollWheelEvent2Source: eventSource,
+            units: .pixel,
+            wheelCount: 2,
+            wheel1: wheel1,
+            wheel2: wheel2,
+            wheel3: 0
+        )
+        
+        cgEvent?.post(tap: CGEventTapLocation.cghidEventTap)
+    }
+    
     // ─── Coordinator Math ───
     
     private func calculateScreenPoint(normX: Double, normY: Double) -> CGPoint {
-        // Retrieve size of the primary active screen
-        let screenFrame = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        // Retrieve exact bounds of the primary active screen (which the Virtual Display was forced to become)
+        let bounds = CGDisplayBounds(CGMainDisplayID())
         
         // normalized coordinates are 0.0 - 1.0 relative to display bounding box
-        let screenX = CGFloat(normX) * screenFrame.width
-        let screenY = CGFloat(normY) * screenFrame.height
+        let screenX = bounds.minX + CGFloat(normX) * bounds.width
+        let screenY = bounds.minY + CGFloat(normY) * bounds.height
         
         return CGPoint(x: screenX, y: screenY)
     }

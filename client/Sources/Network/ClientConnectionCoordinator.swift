@@ -34,6 +34,9 @@ class ClientConnectionCoordinator: NSObject, ObservableObject {
     private let turnPass: String
     
     private var activeRoomId: String?
+    private var targetBitrateKbps: Int = 8000
+    private var targetWidth: Int = 1920
+    private var targetHeight: Int = 1080
     
     // ─── Exponential Backoff Reconnection Parameters ───
     private var isReconnecting = false
@@ -57,12 +60,16 @@ class ClientConnectionCoordinator: NSObject, ObservableObject {
     }
     
     /// Connect to the signaling server and join a room
-    func connect(roomId: String) {
+    func connect(roomId: String, bitrateKbps: Int = 8000, width: Int = 1920, height: Int = 1080) {
         // Cancel any pending reconnect tasks
         reconnectWorkItem?.cancel()
         reconnectWorkItem = nil
         
         self.activeRoomId = roomId
+        self.targetBitrateKbps = bitrateKbps
+        self.targetWidth = width
+        self.targetHeight = height
+        
         self.isReconnecting = false
         self.reconnectAttempt = 0
         
@@ -104,9 +111,8 @@ class ClientConnectionCoordinator: NSObject, ObservableObject {
         updateState(.idle)
     }
     
-    /// Send remote control input data via the "input_control" DataChannel
-    func sendInputEvent(_ data: Data) {
-        webRTCManager?.sendInputData(data)
+    func sendInputEvent(_ data: Data, reliable: Bool = true) {
+        webRTCManager?.sendInputData(data, reliable: reliable)
     }
     
     // ─── Private Helpers ───
@@ -247,9 +253,7 @@ class ClientConnectionCoordinator: NSObject, ObservableObject {
 extension ClientConnectionCoordinator: SignalingClientDelegate {
     
     func signalingClientDidConnect(_ client: SignalingClient) {
-        guard let roomId = activeRoomId else { return }
-        updateState(.joiningRoom)
-        client.joinRoom(roomId: roomId)
+        print("[ClientCoordinator] Connected to signaling server. Waiting for welcome message...")
     }
     
     func signalingClientDidDisconnect(_ client: SignalingClient) {
@@ -263,6 +267,16 @@ extension ClientConnectionCoordinator: SignalingClientDelegate {
     
     func signalingClient(_ client: SignalingClient, didReceiveWelcome deviceId: String, role: String) {
         print("[ClientCoordinator] Welcome package unpacked. Device ID: \(deviceId)")
+        guard let roomId = activeRoomId else { return }
+        updateState(.joiningRoom)
+        
+        let settings: [String: Any] = [
+            "bitrateKbps": targetBitrateKbps,
+            "width": targetWidth,
+            "height": targetHeight
+        ]
+        
+        client.joinRoom(roomId: roomId, settings: settings)
     }
     
     func signalingClient(_ client: SignalingClient, didJoinRoom roomId: String) {
@@ -343,11 +357,38 @@ extension ClientConnectionCoordinator: WebRTCManagerDelegate {
     }
     
     func webRTCManager(_ manager: WebRTCManager, didGenerateLocalIceCandidate candidate: RTCIceCandidate) {
+        // 1. Send the original WebRTC generated candidate
         signalingClient?.sendICECandidate(
             sdpMid: candidate.sdpMid ?? "",
             sdpMLineIndex: candidate.sdpMLineIndex,
             candidate: candidate.sdp
         )
+        
+        // 2. Scan all local network interfaces (including VPN / Tailscale 100.x.x.x)
+        // and replicate this candidate for each IP, overriding the connection address.
+        // This bypasses WebRTC's default filtering of VPN/tun virtual interfaces on iOS.
+        let localIPs = getLocalIPv4Addresses()
+        let candidateSdp = candidate.sdp
+        let parts = candidateSdp.components(separatedBy: " ")
+        
+        if parts.count > 4 {
+            let originalIP = parts[4]
+            if originalIP.contains(".") { // IPv4 verification
+                for ip in localIPs {
+                    if ip != originalIP {
+                        var modifiedParts = parts
+                        modifiedParts[4] = ip
+                        let modifiedSdp = modifiedParts.joined(separator: " ")
+                        print("[ClientCoordinator] Replicating ICE Candidate for VPN/Tailscale interface (\(ip)): \(modifiedSdp)")
+                        signalingClient?.sendICECandidate(
+                            sdpMid: candidate.sdpMid ?? "",
+                            sdpMLineIndex: candidate.sdpMLineIndex,
+                            candidate: modifiedSdp
+                        )
+                    }
+                }
+            }
+        }
     }
     
     func webRTCManager(_ manager: WebRTCManager, didDiscoverLocalSdp sdp: String) {
@@ -408,4 +449,31 @@ extension ClientConnectionCoordinator: WebRTCManagerDelegate {
             print("[ClientCoordinator] Error decoding incoming data channel package: \(error.localizedDescription)")
         }
     }
+}
+
+// ─── Network Utilities for VPN/Tailscale Traversal ───
+
+private func getLocalIPv4Addresses() -> [String] {
+    var addresses: [String] = []
+    var ifaddr: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&ifaddr) == 0 else { return [] }
+    guard let firstAddr = ifaddr else { return [] }
+    
+    for ptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
+        let flags = Int32(ptr.pointee.ifa_flags)
+        guard let addr = ptr.pointee.ifa_addr else { continue }
+        
+        // Check for running IPv4 interface that is not loopback
+        if addr.pointee.sa_family == UInt8(AF_INET) {
+            if (flags & IFF_LOOPBACK) == 0 {
+                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(addr, socklen_t(addr.pointee.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
+                    let address = String(cString: hostname)
+                    addresses.append(address)
+                }
+            }
+        }
+    }
+    freeifaddrs(ifaddr)
+    return addresses
 }

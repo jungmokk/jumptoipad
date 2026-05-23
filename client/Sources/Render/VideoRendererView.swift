@@ -18,6 +18,8 @@ struct VideoRendererView: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: TouchInputContainerView, context: Context) {
+        uiView.inputCollector = inputCollector
+        
         // Handle dynamic changes in the video track
         if let track = videoTrack {
             print("[Render] Binding incoming RTCVideoTrack '\(track.trackId)' to Metal view.")
@@ -33,8 +35,9 @@ struct VideoRendererView: UIViewRepresentable {
 }
 
 /// Custom UIView container that houses the WebRTC Metal view and intercepts
+/// Custom UIView container that houses the WebRTC Metal view and intercepts
 /// touch, drag, Apple Pencil (pressure & tilt), and Magic Keyboard input events.
-class TouchInputContainerView: UIView {
+class TouchInputContainerView: UIView, UIPointerInteractionDelegate {
     
     var inputCollector: InputCollector?
     let videoView = RTCMTLVideoView(frame: .zero)
@@ -47,8 +50,9 @@ class TouchInputContainerView: UIView {
         super.init(frame: frame)
         
         // Add RTCMTLVideoView as subview
-        videoView.videoContentMode = .scaleAspectFit
+        videoView.videoContentMode = .scaleAspectFill
         videoView.clipsToBounds = true
+        videoView.isUserInteractionEnabled = false
         videoView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(videoView)
         
@@ -66,6 +70,20 @@ class TouchInputContainerView: UIView {
         let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTapToFocus))
         tapGesture.cancelsTouchesInView = false
         addGestureRecognizer(tapGesture)
+        
+        // Hover Gesture for Trackpad/Mouse movement without clicking
+        let hoverGesture = UIHoverGestureRecognizer(target: self, action: #selector(handleHover(_:)))
+        addGestureRecognizer(hoverGesture)
+        
+        // Pan Gesture specifically for Trackpad Two-finger scrolling / Mouse Wheel
+        let scrollGesture = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan(_:)))
+        scrollGesture.allowedScrollTypesMask = .all
+        scrollGesture.allowedTouchTypes = [] // IMPORTANT: Ignore normal touch dragging
+        addGestureRecognizer(scrollGesture)
+        
+        // Pointer Interaction to hide iPad native cursor
+        let pointerInteraction = UIPointerInteraction(delegate: self)
+        addInteraction(pointerInteraction)
     }
     
     required init?(coder: NSCoder) {
@@ -82,6 +100,37 @@ class TouchInputContainerView: UIView {
     // ─── First Responder for Keyboard Capture ───
     override var canBecomeFirstResponder: Bool {
         return true
+    }
+    
+    // ─── Pointer Interaction (Hide native cursor) ───
+    func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? {
+        // Completely hide the iPadOS cursor so it doesn't overlap with the Mac cursor
+        return UIPointerStyle.hidden()
+    }
+    
+    // ─── Trackpad / Mouse Specific Handling ───
+    
+    @objc private func handleHover(_ gesture: UIHoverGestureRecognizer) {
+        guard let inputCollector = inputCollector else { return }
+        let location = gesture.location(in: self)
+        let size = self.bounds.size
+        
+        if gesture.state == .changed || gesture.state == .began {
+            inputCollector.sendMouseMoveEvent(at: location, in: size)
+        }
+    }
+    
+    @objc private func handleScrollPan(_ gesture: UIPanGestureRecognizer) {
+        guard let inputCollector = inputCollector else { return }
+        
+        let translation = gesture.translation(in: self)
+        // Reset translation so we get continuous deltas
+        gesture.setTranslation(.zero, in: self)
+        
+        // Trackpad scrolling on Mac vs iOS (we pass raw delta and let macOS handle natural scrolling)
+        if gesture.state == .changed || gesture.state == .began {
+            inputCollector.sendScrollEvent(deltaX: Double(translation.x), deltaY: Double(translation.y))
+        }
     }
     
     // ─── Touch and Apple Pencil Handling ───
@@ -127,14 +176,16 @@ class TouchInputContainerView: UIView {
         let size = self.bounds.size
         
         if touch.type == .pencil {
-            // Capture Apple Pencil pressure & altitude angle (tilt)
             let pressure = Float(touch.force)
             let tilt = Float(touch.altitudeAngle)
+            print("[TouchInput] Pencil Event - loc: \(location), pressure: \(pressure)")
             inputCollector.sendPencilEvent(at: location, in: size, pressure: pressure, tilt: tilt)
         } else {
             if isMove {
+                print("[TouchInput] Mouse Move Event - loc: \(location) in size: \(size)")
                 inputCollector.sendMouseMoveEvent(at: location, in: size)
             } else {
+                print("[TouchInput] Mouse Tap/Click Event - loc: \(location) in size: \(size)")
                 inputCollector.sendTapEvent(at: location, in: size)
             }
         }

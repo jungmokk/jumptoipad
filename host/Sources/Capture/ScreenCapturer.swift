@@ -2,6 +2,7 @@ import Foundation
 import ScreenCaptureKit
 import WebRTC
 import CoreMedia
+import VideoToolbox
 
 /// Delegate protocol for ScreenCapturer events
 protocol ScreenCapturerDelegate: AnyObject {
@@ -23,12 +24,17 @@ class ScreenCapturer: NSObject {
     
     // Configurable Capture parameters
     private let targetFps: Int = 60
-    private let pixelFormat = kCVPixelFormatType_32BGRA // Optimal and standard for WebRTC compatibility
+    // Use NV12 for Zero-Copy Hardware Encoding (VideoToolbox)
+    private let pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
     
     /// Starts capturing a specified display (defaults to main display) and system audio loopback
-    func startCapture() {
+    func startCapture(targetWidth: Int? = nil, targetHeight: Int? = nil, displayID: CGDirectDisplayID? = nil) {
         guard !isCapturing else { return }
         
+        attemptCapture(targetWidth: targetWidth, targetHeight: targetHeight, displayID: displayID, retriesLeft: 10)
+    }
+    
+    private func attemptCapture(targetWidth: Int?, targetHeight: Int?, displayID: CGDirectDisplayID?, retriesLeft: Int) {
         // Retrieve shareable content to find the primary display
         SCShareableContent.getWithCompletionHandler { [weak self] content, error in
             guard let self = self else { return }
@@ -37,7 +43,21 @@ class ScreenCapturer: NSObject {
                 return
             }
             
-            guard let content = content, let display = content.displays.first else {
+            var selectedDisplay: SCDisplay?
+            if let displayID = displayID {
+                selectedDisplay = content?.displays.first { $0.displayID == displayID }
+                
+                // If the display isn't in SCShareableContent yet (timing issue with virtual displays), retry
+                if selectedDisplay == nil && retriesLeft > 0 {
+                    print("[Capture] Display ID \(displayID) not yet visible to ScreenCaptureKit. Retrying in 0.5s... (\(retriesLeft) attempts left)")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        self.attemptCapture(targetWidth: targetWidth, targetHeight: targetHeight, displayID: displayID, retriesLeft: retriesLeft - 1)
+                    }
+                    return
+                }
+            }
+            
+            guard let display = selectedDisplay ?? content?.displays.first else {
                 let displayError = NSError(
                     domain: "com.jumpdesktop.screencapture",
                     code: -1,
@@ -47,7 +67,7 @@ class ScreenCapturer: NSObject {
                 return
             }
             
-            self.setupStream(with: display)
+            self.setupStream(with: display, targetWidth: targetWidth, targetHeight: targetHeight)
         }
     }
     
@@ -68,20 +88,28 @@ class ScreenCapturer: NSObject {
     
     // ─── Private Stream Setup ───
     
-    private func setupStream(with display: SCDisplay) {
+    private func setupStream(with display: SCDisplay, targetWidth: Int?, targetHeight: Int?) {
         // Create an inclusive filter for the selected display
-        let filter = SCContentFilter(display: display, excludingApplications: [])
+        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
         
         // Define stream configurations
         let config = SCStreamConfiguration()
         
+        var width = targetWidth ?? display.width
+        var height = targetHeight ?? display.height
+        
+        // CRITICAL: WebRTC's H264 hardware encoder (VideoToolbox) will crash with EXC_BREAKPOINT 
+        // if the pixel buffer width or height is not an even number. Align to 2.
+        width = (width / 2) * 2
+        height = (height / 2) * 2
+        
         // Resolution (accounting for scale factor if needed, or matching display native size)
-        config.width = display.width
-        config.height = display.height
+        config.width = width
+        config.height = height
         
         // Framerate pacing
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(targetFps))
-        config.queueDepth = 8 // Sufficient depth to prevent stuttering on frames drop
+        config.queueDepth = 2 // Extremely low depth for real-time low latency (drop frames rather than buffering)
         config.pixelFormat = pixelFormat
         
         // Custom performance settings
@@ -102,13 +130,13 @@ class ScreenCapturer: NSObject {
             let scStream = SCStream(filter: filter, configuration: config, delegate: self)
             
             // Add stream outputs for both Video and Audio to the interactive queue
-            try scStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
+            try scStream.addStreamOutput(self, type: SCStreamOutputType.screen, sampleHandlerQueue: captureQueue)
             
             if #available(macOS 13.0, *) {
-                try scStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: captureQueue)
+                try scStream.addStreamOutput(self, type: SCStreamOutputType.audio, sampleHandlerQueue: captureQueue)
             }
             
-            scStream.startCapture { [weak self] error in
+            scStream.startCapture { [weak self] (error: Error?) in
                 guard let self = self else { return }
                 if let error = error {
                     self.delegate?.screenCapturer(self, didFailWithError: error)
@@ -117,7 +145,7 @@ class ScreenCapturer: NSObject {
                 
                 self.stream = scStream
                 self.isCapturing = true
-                print("[Capture] SCStream started. Dimensions: \(display.width)x\(display.height) @ \(self.targetFps)fps")
+                print("[Capture] SCStream started. Dimensions: \(width)x\(height) @ \(self.targetFps)fps")
             }
             
         } catch {
@@ -165,10 +193,12 @@ extension ScreenCapturer: SCStreamOutput {
         
         let rtcVideoFrame = RTCVideoFrame(
             buffer: rtcPixelBuffer,
-            rotation: .rotation_0,
+            rotation: ._0,
             timeStampNs: timestampNs
         )
         
         delegate?.screenCapturer(self, didCaptureVideoFrame: rtcVideoFrame)
     }
+    
+
 }

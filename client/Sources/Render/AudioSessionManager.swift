@@ -19,7 +19,7 @@ class AudioSessionManager {
             try session.setCategory(
                 .playAndRecord,
                 mode: .voiceChat, // voiceChat optimizes for lowest delay and applies system echo cancellation
-                options: [.allowBluetooth, .defaultToSpeaker]
+                options: [.allowBluetoothHFP, .defaultToSpeaker]
             )
             
             // Set preferred sample rate (48kHz matches Opus/ScreenCaptureKit audio captures)
@@ -33,7 +33,6 @@ class AudioSessionManager {
             
             // Integrate WebRTC audio session listener
             let rtcSession = RTCAudioSession.sharedInstance()
-            rtcSession.isAPNEnabled = true // Allow standard audio processing
             
             print("[Audio] AVAudioSession configured successfully. SampleRate: \(session.sampleRate)Hz, Latency: \(session.ioBufferDuration * 1000)ms")
             

@@ -14,13 +14,16 @@ class WebRTCManager: NSObject {
     
     weak var delegate: WebRTCManagerDelegate?
     
-    private var peerConnectionFactory: RTCPeerConnectionFactory
+    let peerConnectionFactory: RTCPeerConnectionFactory
     private var peerConnection: RTCPeerConnection?
     private var dataChannel: RTCDataChannel?
+    private var unreliableDataChannel: RTCDataChannel?
     
     private let iceServers: [String]
     private let turnUsername: String
     private let turnCredential: String
+    
+    private var currentTargetBitrateKbps: Int = 8000
     
     /// Initialize WebRTCManager with TURN server settings
     init(iceServers: [String], turnUsername: String, turnCredential: String) {
@@ -81,28 +84,81 @@ class WebRTCManager: NSObject {
         
         self.peerConnection = connection
         
-        // Set up the input data channel for receiving keyboard/mouse inputs
+        // Set up the reliable data channel for keys/clicks
         let dataChannelConfig = RTCDataChannelConfiguration()
-        dataChannelConfig.isOrdered = true // Important for remote control inputs
-        dataChannelConfig.maxRetransmits = -1
-        dataChannelConfig.maxPacketLifeTime = -1
+        dataChannelConfig.isOrdered = true
         
-        guard let channel = connection.dataChannel(
-            forLabel: "input_control",
-            configuration: dataChannelConfig
-        ) else {
-            print("[WebRTC] Failed to create 'input_control' data channel.")
+        guard let channel = connection.dataChannel(forLabel: "input_control", configuration: dataChannelConfig) else {
+            print("[WebRTC] Failed to create reliable data channel.")
             return
         }
         
-        channel.delegate = self
         self.dataChannel = channel
+        self.dataChannel?.delegate = self
+        
+        // Set up the unreliable data channel for high-frequency mouse movements
+        let unreliableConfig = RTCDataChannelConfiguration()
+        unreliableConfig.isOrdered = false
+        unreliableConfig.maxRetransmits = 0
+        
+        guard let uChannel = connection.dataChannel(forLabel: "input_control_unreliable", configuration: unreliableConfig) else {
+            print("[WebRTC] Failed to create unreliable data channel.")
+            return
+        }
+        
+        self.unreliableDataChannel = uChannel
+        self.unreliableDataChannel?.delegate = self
         
         print("[WebRTC] PeerConnection and DataChannel set up successfully.")
     }
     
+    private func modifySdpToMaximizeBitrate(_ sdp: String, targetBitrateKbps: Int) -> String {
+        let lines = sdp.components(separatedBy: "\r\n")
+        var modifiedLines: [String] = []
+        
+        // 1. Find all H264 payload types
+        var h264PayloadTypes: [String] = []
+        for line in lines {
+            if line.starts(with: "a=rtpmap:") && line.contains("H264/90000") {
+                let parts = line.components(separatedBy: " ")
+                if let ptStr = parts.first?.replacingOccurrences(of: "a=rtpmap:", with: "") {
+                    h264PayloadTypes.append(ptStr)
+                }
+            }
+        }
+        
+        // 2. Munge SDP to force H264 priority and inject bitrate limits
+        for line in lines {
+            if line.hasPrefix("m=video") {
+                if !h264PayloadTypes.isEmpty {
+                    var parts = line.components(separatedBy: " ")
+                    if parts.count >= 4 {
+                        let proto = parts[0...2].joined(separator: " ")
+                        var originalPts = Array(parts[3...])
+                        originalPts.removeAll(where: { h264PayloadTypes.contains($0) })
+                        let newPts = h264PayloadTypes + originalPts
+                        modifiedLines.append("\(proto) \(newPts.joined(separator: " "))")
+                    } else {
+                        modifiedLines.append(line)
+                    }
+                } else {
+                    modifiedLines.append(line)
+                }
+                
+                modifiedLines.append("b=AS:\(targetBitrateKbps)")
+                modifiedLines.append("b=TIAS:\(targetBitrateKbps * 1000)")
+            } else {
+                modifiedLines.append(line)
+            }
+        }
+        
+        return modifiedLines.joined(separator: "\r\n")
+    }
+    
     /// Create SDP Offer and notify via delegate
-    func createOffer() {
+    func createOffer(targetBitrateKbps: Int = 8000) {
+        self.currentTargetBitrateKbps = targetBitrateKbps
+        
         guard let connection = peerConnection else {
             print("[WebRTC] Error: PeerConnection is not initialized.")
             return
@@ -125,14 +181,18 @@ class WebRTCManager: NSObject {
             
             guard let localSdp = sdpDescription else { return }
             
-            connection.setLocalDescription(localSdp) { error in
+            // Inject high-bitrate limits to SDP
+            let modifiedSdpString = self.modifySdpToMaximizeBitrate(localSdp.sdp, targetBitrateKbps: targetBitrateKbps)
+            let modifiedLocalSdp = RTCSessionDescription(type: localSdp.type, sdp: modifiedSdpString)
+            
+            connection.setLocalDescription(modifiedLocalSdp) { error in
                 if let error = error {
                     print("[WebRTC] Error setting local SDP: \(error.localizedDescription)")
                     return
                 }
                 
-                print("[WebRTC] Offer created and set as LocalDescription.")
-                self.delegate?.webRTCManager(self, didDiscoverLocalSdp: localSdp.sdp)
+                print("[WebRTC] Offer created, high-bitrate injected and set as LocalDescription.")
+                self.delegate?.webRTCManager(self, didDiscoverLocalSdp: modifiedLocalSdp.sdp)
             }
         }
     }
@@ -142,11 +202,38 @@ class WebRTCManager: NSObject {
         guard let connection = peerConnection else { return }
         
         let remoteSdp = RTCSessionDescription(type: .answer, sdp: sdp)
-        connection.setRemoteDescription(remoteSdp) { error in
+        connection.setRemoteDescription(remoteSdp) { [weak self] error in
+            guard let self = self else { return }
             if let error = error {
                 print("[WebRTC] Error setting remote answer: \(error.localizedDescription)")
             } else {
                 print("[WebRTC] Remote Answer set successfully.")
+                self.optimizeVideoBitrate(targetBitrateKbps: self.currentTargetBitrateKbps)
+            }
+        }
+    }
+    
+    /// Configures high-fidelity, high-bitrate encoding variables for the desktop streaming pipeline
+    private func optimizeVideoBitrate(targetBitrateKbps: Int = 8000) {
+        guard let connection = peerConnection else { return }
+        
+        let targetBps = targetBitrateKbps * 1000
+        let minBps = min(2_000_000, targetBps / 2)
+        
+        for sender in connection.senders {
+            if let track = sender.track, track.kind == kRTCMediaStreamTrackKindVideo {
+                let parameters = sender.parameters
+                for encoding in parameters.encodings {
+                    encoding.maxBitrateBps = NSNumber(value: targetBps)
+                    encoding.minBitrateBps = NSNumber(value: minBps)
+                    encoding.maxFramerate = NSNumber(value: 60)
+                }
+                
+                // Lock resolution completely to prevent VideoToolbox reconstruction crashes due to dynamic resizing, adapting framerate instead if bandwidth is low
+                parameters.degradationPreference = NSNumber(value: RTCDegradationPreference.maintainResolution.rawValue)
+                
+                sender.parameters = parameters
+                print("[WebRTC] Video quality parameters injected: Max \(targetBitrateKbps)kbps, Min \(minBps / 1000)kbps, 60FPS (Maintain Framerate).")
             }
         }
     }
@@ -212,6 +299,10 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
         print("[WebRTC] Stream removed.")
     }
     
+    func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {
+        print("[WebRTC] Peer connection should negotiate.")
+    }
+    
     func peerConnectionShouldTriggerIceRestart(_ peerConnection: RTCPeerConnection) {
         print("[WebRTC] ICE restart triggered.")
     }
@@ -237,7 +328,7 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
         print("[WebRTC] Data channel opened: \(dataChannel.label)")
     }
     
-    func peerConnection(_ peerConnection: RTCPeerConnection, didChangeState newState: RTCPeerConnectionState) {
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCPeerConnectionState) {
         print("[WebRTC] Peer Connection State changed: \(newState.rawValue)")
         delegate?.webRTCManager(self, didChangeConnectionState: newState)
     }

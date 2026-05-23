@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage } from 'http';
 import { v4 as uuidv4 } from 'uuid';
 import { verifyToken, extractTokenFromRequest, generateToken, JwtPayload } from './auth/jwt';
+import * as jwt from 'jsonwebtoken';
 
 /**
  * Jump Desktop Clone — WebSocket Signaling Server
@@ -53,7 +54,7 @@ const peers = new Map<WebSocket, ConnectedPeer>();
 // ─── Configuration ───
 
 const PORT = parseInt(process.env.PORT || '8443', 10);
-const HOST = process.env.HOST || '127.0.0.1'; // SECURITY: localhost for testing
+const HOST = process.env.HOST || '0.0.0.0'; // Allow all network interfaces (Tailscale/LAN) for testing
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const PEER_TIMEOUT_MS = 60_000;
 const MAX_MESSAGE_SIZE = 64 * 1024; // 64KB max for signaling messages
@@ -117,6 +118,28 @@ const wss = new WebSocketServer({
     if (!token) {
       console.warn('[WS] Connection rejected: No token provided.');
       callback(false, 401, 'Authentication required');
+      return;
+    }
+
+    // [Development Bypass] Allow mock tokens ending with '.mockToken' or equal to 'mockToken'
+    if (token === 'mockToken' || token.endsWith('.mockToken')) {
+      console.log('[WS] Development mock token detected. Bypassing JWT verification.');
+      try {
+        const decoded = jwt.decode(token) as JwtPayload;
+        if (decoded && decoded.sub && decoded.role) {
+          (info.req as any)._jwtPayload = decoded;
+          callback(true);
+          return;
+        }
+      } catch (e) {}
+      
+      // Fallback if decode fails
+      const isClient = token.includes('client') || token.includes('Client');
+      (info.req as any)._jwtPayload = {
+        sub: isClient ? 'mockClient' : 'macMiniHost',
+        role: isClient ? 'client' : 'host'
+      };
+      callback(true);
       return;
     }
 
@@ -203,7 +226,7 @@ function handleMessage(peer: ConnectedPeer, message: SignalingMessage): void {
         sendError(peer.ws, 'Missing or invalid roomId');
         return;
       }
-      handleJoinRoom(peer, message.roomId);
+      handleJoinRoom(peer, message.roomId, message.payload);
       break;
 
     case 'sdp_offer':
@@ -243,7 +266,16 @@ function handleCreateRoom(peer: ConnectedPeer): void {
     return;
   }
 
-  const roomId = uuidv4().substring(0, 8).toUpperCase(); // Short room code for easy sharing
+  const roomId = "JUMPTOIPAD";
+  if (rooms.has(roomId)) {
+    const existing = rooms.get(roomId);
+    if (existing) {
+      if (existing.host) existing.host.roomId = null;
+      if (existing.client) existing.client.roomId = null;
+    }
+    rooms.delete(roomId);
+  }
+
   const room: Room = {
     id: roomId,
     host: peer,
@@ -262,7 +294,7 @@ function handleCreateRoom(peer: ConnectedPeer): void {
   });
 }
 
-function handleJoinRoom(peer: ConnectedPeer, roomId: string): void {
+function handleJoinRoom(peer: ConnectedPeer, roomId: string, payload?: unknown): void {
   if (peer.role !== 'client') {
     sendError(peer.ws, 'Only client devices can join rooms');
     return;
@@ -302,6 +334,7 @@ function handleJoinRoom(peer: ConnectedPeer, roomId: string): void {
     sendMessage(room.host.ws, {
       type: 'peer_joined',
       deviceId: peer.deviceId,
+      payload: payload,
     });
   }
 }

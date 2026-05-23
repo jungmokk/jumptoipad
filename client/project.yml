@@ -1,0 +1,29 @@
+name: ClientApp
+options:
+  bundleIdPrefix: com.jumpdesktop
+targets:
+  ClientApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - Sources
+    dependencies:
+      - package: WebRTC
+        product: WebRTC
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jumpdesktop.ClientApp
+        TARGETED_DEVICE_FAMILY: "2"
+        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "WebRTC 오디오 수신 및 실시간 통신 음성 전송을 위해 마이크 권한이 필요합니다."
+        INFOPLIST_KEY_NSCameraUsageDescription: "WebRTC 실시간 비디오 및 스트리밍 상호작용을 위해 카메라 권한이 필요합니다."
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "로컬 사설망 혹은 VPN(Tailscale) 상에 위치한 macOS 호스트 컴퓨터와 초저지연 미디어 터널을 안전하게 구축하기 위해 권한이 필요합니다."
+
+packages:
+  WebRTC:
+    url: https://github.com/stasel/WebRTC.git
+    from: 104.0.0

@@ -1,10 +1,30 @@
 import Foundation
 import ApplicationServices
 import AppKit
+import CoreGraphics
+import AVFoundation
+import ScreenCaptureKit
 
 /// A utility helper to manage and check macOS Accessibility (AX) API permissions.
 /// Accessibility is strictly required for global hardware event injection (CGEvent.post).
 class AccessibilityHelper {
+    
+    /// Request Screen Recording permission.
+    static func requestScreenCapturePermission() {
+        if #available(macOS 12.3, *) {
+            // This reliably triggers the Screen Recording permission dialog in macOS 13+
+            SCShareableContent.getExcludingDesktopWindows(true, onScreenWindowsOnly: true) { _, _ in }
+        } else {
+            CGRequestScreenCaptureAccess()
+        }
+    }
+    
+    /// Request Audio recording/microphone permission.
+    static func requestAudioCapturePermission() {
+        AVCaptureDevice.requestAccess(for: .audio) { granted in
+            print("[Permission] Audio capture access granted: \(granted)")
+        }
+    }
     
     /// Check if the application is currently authorized to use Accessibility APIs for event injection.
     static func isAccessibilityTrusted() -> Bool {

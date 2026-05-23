@@ -1,0 +1,11 @@
+{
+  "name": "jumptoipad-root",
+  "version": "1.0.0",
+  "description": "Root package.json to proxy scripts to the server directory",
+  "scripts": {
+    "dev": "npm run dev --prefix server",
+    "start": "npm run start --prefix server",
+    "build": "npm run build --prefix server",
+    "install-server": "npm install --prefix server"
+  }
+}

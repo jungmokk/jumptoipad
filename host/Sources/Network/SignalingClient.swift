@@ -6,7 +6,7 @@ protocol SignalingClientDelegate: AnyObject {
     func signalingClientDidDisconnect(_ client: SignalingClient)
     func signalingClient(_ client: SignalingClient, didReceiveWelcome deviceId: String, role: String)
     func signalingClient(_ client: SignalingClient, didCreateRoom roomId: String)
-    func signalingClient(_ client: SignalingClient, didPeerJoin deviceId: String)
+    func signalingClient(_ client: SignalingClient, didPeerJoin deviceId: String, payload: [String: Any]?)
     func signalingClient(_ client: SignalingClient, didPeerLeave deviceId: String)
     func signalingClient(_ client: SignalingClient, didReceiveSDPOffer sdp: String)
     func signalingClient(_ client: SignalingClient, didReceiveSDPAnswer sdp: String)
@@ -40,7 +40,11 @@ class SignalingClient: NSObject {
     func connect() {
         workQueue.async { [weak self] in
             guard let self = self else { return }
-            self.disconnect()
+            // Perform synchronous cleanup instead of calling async disconnect()
+            self.stopPingTimer()
+            self.webSocketTask?.cancel(with: .normalClosure, reason: nil)
+            self.webSocketTask = nil
+            self.isConnected = false
             
             // Build authenticated WSS request with token query parameter
             var components = URLComponents(url: self.serverURL, resolvingAgainstBaseURL: false)
@@ -143,7 +147,8 @@ class SignalingClient: NSObject {
                     }
                 case "peer_joined":
                     if let deviceId = json["deviceId"] as? String {
-                        delegate?.signalingClient(self, didPeerJoin: deviceId)
+                        let payload = json["payload"] as? [String: Any]
+                        delegate?.signalingClient(self, didPeerJoin: deviceId, payload: payload)
                     }
                 case "peer_left":
                     if let deviceId = json["deviceId"] as? String {
@@ -179,7 +184,11 @@ class SignalingClient: NSObject {
     
     private func sendMessage(type: String, payload: [String: Any]? = nil) {
         workQueue.async { [weak self] in
-            guard let self = self, self.isConnected else { return }
+            guard let self = self else { return }
+            guard self.isConnected else {
+                print("[Signaling ERROR] Attempted to send '\(type)' but isConnected is false!")
+                return
+            }
             
             var message: [String: Any] = ["type": type]
             if let payload = payload {
@@ -189,6 +198,7 @@ class SignalingClient: NSObject {
             do {
                 let data = try JSONSerialization.data(withJSONObject: message, options: [])
                 if let jsonString = String(data: data, encoding: .utf8) {
+                    print("[Signaling] Sending message: \(type)")
                     self.webSocketTask?.send(.string(jsonString)) { error in
                         if let error = error {
                             print("[Signaling] Send error: \(error.localizedDescription)")
@@ -225,7 +235,7 @@ extension SignalingClient: URLSessionWebSocketDelegate {
         delegate?.signalingClientDidConnect(self)
     }
     
-    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWithCode closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         print("[Signaling] WebSocket connection closed with code: \(closeCode.rawValue).")
         self.disconnect()
     }
